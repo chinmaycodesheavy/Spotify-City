@@ -485,6 +485,187 @@ function Ground() {
   );
 }
 
+function TinyTree({ position = [0, 0, 0], scale = 1 }) {
+  return (
+    <group position={position} scale={scale}>
+      <mesh position={[0, 0.22, 0]} castShadow>
+        <cylinderGeometry args={[0.035, 0.05, 0.44, 8]} />
+        <meshStandardMaterial color="#4b3127" roughness={0.95} />
+      </mesh>
+      <mesh position={[0, 0.52, 0]} castShadow>
+        <sphereGeometry args={[0.18, 12, 12]} />
+        <meshStandardMaterial color="#5d9b63" emissive="#2a5f34" emissiveIntensity={0.06} roughness={0.95} />
+      </mesh>
+    </group>
+  );
+}
+
+function KidFigure({ position = [0, 0, 0], shirt = "#ffd166" }) {
+  return (
+    <group position={position}>
+      <mesh position={[0, 0.12, 0]} castShadow>
+        <cylinderGeometry args={[0.05, 0.06, 0.18, 10]} />
+        <meshStandardMaterial color={shirt} emissive={shirt} emissiveIntensity={0.05} roughness={0.82} />
+      </mesh>
+      <mesh position={[0, 0.26, 0]} castShadow>
+        <sphereGeometry args={[0.055, 10, 10]} />
+        <meshStandardMaterial color="#f2c6a0" roughness={0.8} />
+      </mesh>
+      <mesh position={[-0.03, 0.02, 0]} castShadow rotation={[0, 0, 0.2]}>
+        <boxGeometry args={[0.02, 0.12, 0.02]} />
+        <meshStandardMaterial color="#93a4bd" roughness={0.9} />
+      </mesh>
+      <mesh position={[0.03, 0.02, 0]} castShadow rotation={[0, 0, -0.2]}>
+        <boxGeometry args={[0.02, 0.12, 0.02]} />
+        <meshStandardMaterial color="#93a4bd" roughness={0.9} />
+      </mesh>
+    </group>
+  );
+}
+
+function DogFigure({ position = [0, 0, 0], color = "#c89a63" }) {
+  return (
+    <group position={position}>
+      <mesh position={[0, 0.08, 0]} castShadow>
+        <boxGeometry args={[0.18, 0.11, 0.08]} />
+        <meshStandardMaterial color={color} roughness={0.88} />
+      </mesh>
+      <mesh position={[0.12, 0.11, 0]} castShadow>
+        <boxGeometry args={[0.08, 0.08, 0.07]} />
+        <meshStandardMaterial color={color} roughness={0.88} />
+      </mesh>
+      <mesh position={[-0.11, 0.12, 0.04]} rotation={[0, 0, 0.7]} castShadow>
+        <boxGeometry args={[0.02, 0.1, 0.02]} />
+        <meshStandardMaterial color={color} roughness={0.88} />
+      </mesh>
+      {[-0.05, 0.02, 0.09, 0.15].map((x, index) => (
+        <mesh key={index} position={[x - 0.04, 0.02, index % 2 === 0 ? 0.025 : -0.025]} castShadow>
+          <boxGeometry args={[0.02, 0.08, 0.02]} />
+          <meshStandardMaterial color="#6f5235" roughness={0.9} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function SwingSet({ position = [0, 0, 0], accent = "#6dd7ff" }) {
+  return (
+    <group position={position}>
+      <mesh position={[-0.18, 0.3, 0]} rotation={[0, 0, 0.24]} castShadow>
+        <boxGeometry args={[0.03, 0.62, 0.03]} />
+        <meshStandardMaterial color="#93a4bd" metalness={0.2} roughness={0.7} />
+      </mesh>
+      <mesh position={[0.18, 0.3, 0]} rotation={[0, 0, -0.24]} castShadow>
+        <boxGeometry args={[0.03, 0.62, 0.03]} />
+        <meshStandardMaterial color="#93a4bd" metalness={0.2} roughness={0.7} />
+      </mesh>
+      <mesh position={[0, 0.58, 0]} castShadow>
+        <boxGeometry args={[0.46, 0.04, 0.04]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.12} roughness={0.52} />
+      </mesh>
+      {[-0.08, 0.08].map((x) => (
+        <group key={x} position={[x, 0.38, 0]}>
+          <mesh position={[0, 0.09, 0]}>
+            <boxGeometry args={[0.008, 0.18, 0.008]} />
+            <meshStandardMaterial color="#d9e4f2" roughness={0.5} metalness={0.15} />
+          </mesh>
+          <mesh position={[0, -0.02, 0]} castShadow>
+            <boxGeometry args={[0.09, 0.018, 0.03]} />
+            <meshStandardMaterial color="#ff7ab6" emissive="#ff7ab6" emissiveIntensity={0.08} roughness={0.7} />
+          </mesh>
+        </group>
+      ))}
+    </group>
+  );
+}
+
+function DogShelter({ position = [0, 0, 0], accent = "#ff69b4" }) {
+  return (
+    <group position={position}>
+      <mesh position={[0, 0.12, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.78, 0.24, 0.46]} />
+        <meshStandardMaterial color="#182231" roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 0.34, 0]} rotation={[0, 0, 0]} castShadow>
+        <coneGeometry args={[0.38, 0.22, 4]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.08} roughness={0.74} />
+      </mesh>
+      <mesh position={[0, 0.12, 0.23]}>
+        <planeGeometry args={[0.18, 0.14]} />
+        <meshBasicMaterial color="#2b0f26" transparent opacity={0.75} />
+      </mesh>
+      <DogFigure position={[-0.12, 0, -0.02]} color="#b68552" />
+      <DogFigure position={[0.16, 0, 0.04]} color="#d1d5db" />
+    </group>
+  );
+}
+
+function PocketPark({ position = [0, 0, 0], accent = "#6dd7ff" }) {
+  return (
+    <group position={position}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[2.2, 1.7]} />
+        <meshStandardMaterial color="#122032" roughness={1} />
+      </mesh>
+      <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[1.85, 1.35]} />
+        <meshStandardMaterial color="#2d5136" emissive="#24492d" emissiveIntensity={0.08} roughness={0.98} />
+      </mesh>
+      <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.22, 0.34, 24]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.18} />
+      </mesh>
+      <TinyTree position={[-0.68, 0, -0.42]} />
+      <TinyTree position={[0.7, 0, -0.36]} scale={0.9} />
+      <TinyTree position={[-0.62, 0, 0.46]} scale={0.95} />
+      <SwingSet position={[0.54, 0.02, 0.24]} accent={accent} />
+      <KidFigure position={[0.08, 0.02, -0.12]} shirt="#ffd166" />
+      <KidFigure position={[-0.14, 0.02, 0.18]} shirt="#7dd3fc" />
+      <DogFigure position={[0.32, 0.02, -0.26]} color="#d9a066" />
+    </group>
+  );
+}
+
+function CityLife({ artists }) {
+  const parks = useMemo(() => {
+    if (!artists.length) return [];
+    const sorted = [...artists]
+      .sort((a, b) => Math.hypot(a.x || 0, a.z || 0) - Math.hypot(b.x || 0, b.z || 0))
+      .slice(0, Math.min(4, artists.length));
+
+    return sorted.map((artist, index) => {
+      const angle = Math.atan2(artist.z || 0, artist.x || 0) + (index % 2 === 0 ? 0.42 : -0.38);
+      const radius = Math.max(1.8, Math.hypot(artist.x || 0, artist.z || 0) - 1.4);
+      const accent = Object.values(GENRE_COLORS)[index % Object.values(GENRE_COLORS).length].color;
+      return {
+        key: `${artist.id}-park`,
+        position: [Math.cos(angle) * radius * CITY_SCALE, 0.02, Math.sin(angle) * radius * CITY_SCALE],
+        accent,
+      };
+    });
+  }, [artists]);
+
+  const shelter = useMemo(() => {
+    if (!artists.length) return [0, 0.02, 0];
+    const outer = [...artists]
+      .sort((a, b) => Math.hypot(b.x || 0, b.z || 0) - Math.hypot(a.x || 0, a.z || 0))[0];
+    const angle = Math.atan2(outer.z || 0, outer.x || 0) - 0.52;
+    const radius = Math.hypot(outer.x || 0, outer.z || 0) + 1.8;
+    return [Math.cos(angle) * radius * CITY_SCALE, 0.02, Math.sin(angle) * radius * CITY_SCALE];
+  }, [artists]);
+
+  return (
+    <group>
+      {parks.map((park) => (
+        <PocketPark key={park.key} position={park.position} accent={park.accent} />
+      ))}
+      <DogShelter position={shelter} accent="#ff7ab6" />
+      <DogFigure position={[shelter[0] + 0.92, 0.02, shelter[2] + 0.14]} color="#f0d4a4" />
+      <KidFigure position={[shelter[0] - 0.8, 0.02, shelter[2] - 0.12]} shirt="#a8ff78" />
+    </group>
+  );
+}
+
 export default function CityScene({
   artists,
   roads,
@@ -549,6 +730,7 @@ export default function CityScene({
         <Stars radius={78} depth={32} count={1200} factor={3} saturation={0} fade speed={0.35} />
 
         <Ground />
+        <CityLife artists={sceneArtists} />
         {effectiveRoads.map(([from, to], index) => (
           <RoadMesh key={`${from.id}-${to.id}-${index}`} from={from} to={to} />
         ))}
