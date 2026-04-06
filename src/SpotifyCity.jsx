@@ -1,5 +1,6 @@
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import CityScene from "./CityScene.jsx";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || "";
@@ -153,6 +154,22 @@ function mapGenre(raw = "") {
   return "indie";
 }
 
+function normalizeArtistKey(value = "") {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function artistNameMatches(candidate = "", target = "") {
+  const candidateKey = normalizeArtistKey(candidate);
+  const targetKey = normalizeArtistKey(target);
+  if (!candidateKey || !targetKey) return false;
+  return candidateKey === targetKey || candidateKey.includes(targetKey) || targetKey.includes(candidateKey);
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
 function generateBadges(artists, recentItems) {
   const badges = [];
   const nightPlays = recentItems.filter(item => {
@@ -189,19 +206,123 @@ async function buildCityData(token) {
 
   const recentCounts = {};
   const recentDays = {};
+  const recentTrackCounts = {};
+  const recentTrackCountsByName = {};
+  const recentArtistSeeds = {};
   recentRes.items.forEach(item => {
-    const artistId = item.track.artists[0]?.id;
-    if (!artistId) return;
-    recentCounts[artistId] = (recentCounts[artistId] || 0) + 1;
-    if (!recentDays[artistId]) {
-      recentDays[artistId] = Math.max(0, Math.floor((Date.now() - new Date(item.played_at)) / 86400000));
-    }
+    const artistsOnTrack = (item.track?.artists || []).filter(Boolean);
+    const artistIds = artistsOnTrack.map(artist => artist?.id).filter(Boolean);
+    if (!artistIds.length && !artistsOnTrack.length) return;
+
+    artistsOnTrack.forEach((artistInfo) => {
+      const artistId = artistInfo?.id;
+      const artistKey = normalizeArtistKey(artistInfo?.name || "");
+      if (!artistId && !artistKey) return;
+      if (artistId && !recentArtistSeeds[artistId]) {
+        recentArtistSeeds[artistId] = {
+          id: artistId,
+          name: artistInfo?.name || "Unknown artist",
+          genres: [],
+          popularity: 0,
+          followers: { total: 0 },
+          images: [],
+        };
+      }
+      if (artistId) {
+        recentCounts[artistId] = (recentCounts[artistId] || 0) + 1;
+        if (!recentDays[artistId]) {
+          recentDays[artistId] = Math.max(0, Math.floor((Date.now() - new Date(item.played_at)) / 86400000));
+        }
+      }
+      const trackName = item.track?.name;
+      if (trackName) {
+        if (artistId) {
+          recentTrackCounts[artistId] = recentTrackCounts[artistId] || {};
+          recentTrackCounts[artistId][trackName] = (recentTrackCounts[artistId][trackName] || 0) + 1;
+        }
+        if (artistKey) {
+          recentTrackCountsByName[artistKey] = recentTrackCountsByName[artistKey] || {};
+          recentTrackCountsByName[artistKey][trackName] = (recentTrackCountsByName[artistKey][trackName] || 0) + 1;
+        }
+      }
+    });
   });
 
+  const artistPoolMap = new Map();
+  topArtists.forEach((artist) => {
+    if (artist?.id) artistPoolMap.set(artist.id, artist);
+  });
+  Object.values(recentArtistSeeds).forEach((artist) => {
+    if (artist?.id && !artistPoolMap.has(artist.id)) artistPoolMap.set(artist.id, artist);
+  });
+
+  const artistPool = Array.from(artistPoolMap.values())
+    .sort((a, b) => {
+      const recentDiff = (recentCounts[b.id] || 0) - (recentCounts[a.id] || 0);
+      if (recentDiff !== 0) return recentDiff;
+      return toFiniteNumber(b.popularity) - toFiniteNumber(a.popularity);
+    })
+    .slice(0, 40);
+
+  let artistDetailsMap = {};
+  const artistPoolIds = artistPool.map((artist) => artist.id).filter(Boolean);
+  if (artistPoolIds.length) {
+    try {
+      const detailRes = await api(`/artists?ids=${artistPoolIds.join(",")}`, token);
+      (detailRes.artists || []).forEach((artist) => {
+        if (artist?.id) artistDetailsMap[artist.id] = artist;
+      });
+    } catch (e) { /* artist details optional */ }
+  }
+
+  const missingDetailIds = artistPool
+    .map((artist) => artist.id)
+    .filter((id) => id && (!artistDetailsMap[id] || artistDetailsMap[id]?.followers?.total == null));
+
+  if (missingDetailIds.length) {
+    const individualArtistResults = await Promise.allSettled(
+      missingDetailIds.map((id) => api(`/artists/${id}`, token))
+    );
+    individualArtistResults.forEach((result, index) => {
+      if (result.status === "fulfilled" && result.value?.id) {
+        artistDetailsMap[missingDetailIds[index]] = result.value;
+      }
+    });
+  }
+
   const topTracksResults = await Promise.allSettled(
-    topArtists.slice(0, 15).map(a =>
+    artistPool.map(a =>
       api(`/artists/${a.id}/top-tracks?market=${userRes.country || "US"}`, token)
     )
+  );
+
+  const searchFallbackResults = await Promise.allSettled(
+    artistPool.map((artist) =>
+      api(`/search?q=${encodeURIComponent(`artist:${artist.name}`)}&type=track&limit=10&market=${userRes.country || "US"}`, token)
+    )
+  );
+
+  const artistSearchResults = await Promise.allSettled(
+    artistPool.map((artist) =>
+      api(`/search?q=${encodeURIComponent(artist.name)}&type=artist&limit=5&market=${userRes.country || "US"}`, token)
+    )
+  );
+
+  const albumFallbackResults = await Promise.allSettled(
+    artistPool.map((artist) =>
+      api(`/artists/${artist.id}/albums?include_groups=album,single&limit=3&market=${userRes.country || "US"}`, token)
+    )
+  );
+
+  const albumTrackResults = await Promise.allSettled(
+    albumFallbackResults.map((result) => {
+      if (result.status !== "fulfilled") return Promise.resolve([]);
+      const albums = (result.value?.items || []).slice(0, 2);
+      if (!albums.length) return Promise.resolve([]);
+      return Promise.allSettled(
+        albums.map((album) => api(`/albums/${album.id}/tracks?limit=10&market=${userRes.country || "US"}`, token))
+      );
+    })
   );
 
   const topTrackIds = topTracksResults
@@ -216,31 +337,107 @@ async function buildCityData(token) {
     } catch (e) { /* audio features optional */ }
   }
 
-  const artists = topArtists.slice(0, 15).map((artist, i) => {
+  const artists = artistPool.map((artist, i) => {
+    const artistDetails = artistDetailsMap[artist.id] || artist;
     const trackResult = topTracksResults[i];
+    const searchResult = searchFallbackResults[i];
+    const artistSearchResult = artistSearchResults[i];
+    const albumTracksResult = albumTrackResults[i];
+    const searchedArtist = artistSearchResult?.status === "fulfilled"
+      ? ((artistSearchResult.value?.artists?.items || []).find((candidate) => candidate?.id === artist.id || artistNameMatches(candidate?.name, artist.name)) || null)
+      : null;
     const topTrack = trackResult?.status === "fulfilled" ? trackResult.value?.tracks?.[0] : null;
+    const spotifyTopTracks = trackResult?.status === "fulfilled"
+      ? (trackResult.value?.tracks || []).slice(0, 3).map(t => t?.name || "Unknown track")
+      : [];
+    const recentTopTracks = Object.entries(recentTrackCounts[artist.id] || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name]) => name);
+    const recentTopTracksByName = Object.entries(recentTrackCountsByName[normalizeArtistKey(artist.name)] || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name]) => name);
+    const searchTopTracks = searchResult?.status === "fulfilled"
+      ? ((searchResult.value?.tracks?.items || [])
+          .filter((track) => (track.artists || []).some((a) => a?.id === artist.id || artistNameMatches(a?.name, artist.name)))
+          .map((track) => track?.name)
+          .filter(Boolean)
+          .filter((name, index, arr) => arr.indexOf(name) === index)
+          .slice(0, 3))
+      : [];
+    const looseSearchTopTracks = searchResult?.status === "fulfilled"
+      ? ((searchResult.value?.tracks?.items || [])
+          .map((track) => track?.name)
+          .filter(Boolean)
+          .filter((name, index, arr) => arr.indexOf(name) === index)
+          .slice(0, 3))
+      : [];
+    const albumTopTracks = albumTracksResult?.status === "fulfilled"
+      ? (albumTracksResult.value || [])
+          .filter((entry) => entry.status === "fulfilled")
+          .flatMap((entry) => entry.value?.items || [])
+          .filter((track) => (track.artists || []).some((a) => a?.id === artist.id || artistNameMatches(a?.name, artist.name)))
+          .map((track) => track?.name)
+          .filter(Boolean)
+          .filter((name, index, arr) => arr.indexOf(name) === index)
+          .slice(0, 3)
+      : [];
+    const topTracks = (
+      spotifyTopTracks.length
+        ? spotifyTopTracks
+        : recentTopTracks.length
+          ? recentTopTracks
+          : recentTopTracksByName.length
+            ? recentTopTracksByName
+            : searchTopTracks.length
+              ? searchTopTracks
+              : albumTopTracks.length
+                ? albumTopTracks
+                : looseSearchTopTracks
+    ).slice(0, 3);
     const features = topTrack ? (featuresMap[topTrack.id] || {}) : {};
-    const genre = mapGenre(artist.genres?.[0] || "pop");
-    const rankScore = (15 - i) / 15;
+    const resolvedArtist = searchedArtist || artistDetails || artist;
+    const genre = mapGenre(resolvedArtist.genres?.[0] || artistDetails.genres?.[0] || artist.genres?.[0] || "pop");
+    const rankScore = (artistPool.length - i) / Math.max(1, artistPool.length);
     const recentBoost = Math.min(1, (recentCounts[artist.id] || 0) / 10);
-    const angle = (i / 15) * Math.PI * 5;
-    const radius = 2 + i * 0.5;
+    const ringIndex = Math.floor(i / 6);
+    const slotIndex = i % 6;
+    const slotsInRing = 6 + ringIndex * 3;
+    const angle = (slotIndex / slotsInRing) * Math.PI * 2 + ringIndex * 0.42;
+    const radius = 5.2 + ringIndex * 3.4 + (slotIndex % 2) * 0.9;
     return {
       id: artist.id,
       name: artist.name,
       genre,
-      genreRaw: artist.genres?.[0] || "pop",
+      genreRaw: resolvedArtist.genres?.[0] || artistDetails.genres?.[0] || artist.genres?.[0] || "pop",
       plays: recentCounts[artist.id] || Math.floor(rankScore * 40),
       height: 3 + rankScore * 8 + recentBoost * 2,
       energy: features.energy ?? (0.4 + Math.random() * 0.4),
       danceability: features.danceability ?? (0.4 + Math.random() * 0.4),
       valence: features.valence ?? (0.3 + Math.random() * 0.5),
-      popularity: artist.popularity,
-      followers: artist.followers?.total || 0,
+      popularity: (() => {
+        const values = [
+          resolvedArtist.popularity,
+          artistDetails.popularity,
+          artist.popularity,
+        ].map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0);
+        return values.length ? values[0] : null;
+      })(),
+      followers: (() => {
+        const values = [
+          resolvedArtist.followers?.total,
+          artistDetails.followers?.total,
+          artist.followers?.total,
+          searchedArtist?.followers?.total,
+        ].map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0);
+        return values.length ? values[0] : null;
+      })(),
       lastPlayed: recentDays[artist.id] ?? 30,
-      topTrack: topTrack?.name ?? "—",
+      topTrack: topTrack?.name ?? topTracks[0] ?? "—",
+      topTracks,
       previewUrl: topTrack?.preview_url ?? null,
-      imageUrl: artist.images?.[0]?.url ?? null,
+      imageUrl: resolvedArtist.images?.[0]?.url ?? artistDetails.images?.[0]?.url ?? artist.images?.[0]?.url ?? null,
       x: Math.cos(angle) * radius,
       z: Math.sin(angle) * radius,
     };
@@ -287,32 +484,36 @@ function Building({ artist, selected, hovered, onHover, onLeave, onClick, beatPu
   const height = artist.height * timeMultiplier * 36 + beatPulse * artist.energy * 14;
   const iso = toIso(artist.x, artist.z);
   const isActive = selected?.id === artist.id || hovered?.id === artist.id;
+  const depth = Math.max(12, width * 0.34);
 
   return (
     <div
       style={{
         position: "absolute", left: "50%", top: "50%",
-        transform: `translate(${iso.left}px, ${iso.top - bounce}px)`,
+        width,
+        height: height + depth + 80,
+        transform: `translate(${iso.left - width / 2}px, ${iso.top - height - depth - bounce}px)`,
         cursor: "pointer",
         zIndex: Math.floor((artist.x + artist.z) * 10 + 100),
         transition: "transform 0.08s ease",
+        pointerEvents: "auto",
       }}
       onMouseEnter={() => onHover(artist)}
       onMouseLeave={onLeave}
       onClick={() => onClick(artist)}
     >
-      <div style={{ position:"absolute", bottom:-6, left:"50%", transform:"translateX(-50%)", width:width*1.5, height:width*0.5, background:"rgba(0,0,0,0.4)", borderRadius:"50%", filter:"blur(8px)" }} />
-      <div style={{ position:"absolute", bottom:0, left:0, width:width*0.5, height, background:`linear-gradient(to bottom,${genre.color}55,${genre.color}11)`, borderLeft:`1px solid ${genre.color}55`, transform:"skewY(-30deg)", transformOrigin:"bottom left", transition:"height 0.4s ease" }} />
-      <div style={{ position:"absolute", bottom:0, left:width*0.5, width:width*0.5, height:height*0.85, background:`linear-gradient(to bottom,${genre.accent}33,${genre.accent}08)`, borderRight:`1px solid ${genre.accent}55`, transform:"skewY(30deg)", transformOrigin:"bottom right", transition:"height 0.4s ease" }} />
-      <div style={{ position:"absolute", bottom:height-2, left:0, width, height:width*0.3, background:`linear-gradient(135deg,${genre.color}cc,${genre.accent}88)`, transform:"skewX(-30deg) scaleY(0.6)", transformOrigin:"bottom center", boxShadow: isActive ? `0 0 30px ${genre.color},0 0 60px ${genre.color}44` : `0 0 ${10*glowIntensity}px ${genre.color}66`, transition:"box-shadow 0.3s ease, bottom 0.4s ease" }} />
+      <div style={{ position:"absolute", bottom:6, left:"50%", transform:"translateX(-50%)", width:width*1.9, height:width*0.65, background:"rgba(0,0,0,0.5)", borderRadius:"50%", filter:"blur(10px)" }} />
+      <div style={{ position:"absolute", bottom:0, left:0, width:width*0.52, height, background:`linear-gradient(to bottom,${genre.color}cc,${genre.color}3d 55%,rgba(4,10,22,0.92))`, borderLeft:`1px solid ${genre.color}bb`, boxShadow:`inset 0 0 14px ${genre.color}33`, transform:"skewY(-30deg)", transformOrigin:"bottom left", transition:"height 0.4s ease" }} />
+      <div style={{ position:"absolute", bottom:0, left:width*0.48, width:width*0.52, height:height*0.88, background:`linear-gradient(to bottom,${genre.accent}a8,${genre.accent}30 55%,rgba(3,8,18,0.95))`, borderRight:`1px solid ${genre.accent}cc`, boxShadow:`inset 0 0 12px ${genre.accent}22`, transform:"skewY(30deg)", transformOrigin:"bottom right", transition:"height 0.4s ease" }} />
+      <div style={{ position:"absolute", bottom:height-depth*0.15, left:0, width, height:depth, background:`linear-gradient(135deg,${genre.color},${genre.accent})`, border:"1px solid rgba(255,255,255,0.16)", transform:"skewX(-30deg) scaleY(0.72)", transformOrigin:"bottom center", boxShadow: isActive ? `0 0 30px ${genre.color},0 0 60px ${genre.color}44` : `0 0 ${10*glowIntensity}px ${genre.color}66`, transition:"box-shadow 0.3s ease, bottom 0.4s ease" }} />
       {Array.from({ length: Math.min(Math.floor(height / 24), 12) }).map((_, i) => (
-        <div key={i} style={{ position:"absolute", bottom:10+i*24, left:width*0.1, width:width*0.3, height:10, background: Math.sin(i*7+artist.popularity)>0.2 ? `${genre.color}bb` : `${genre.color}22`, boxShadow:`0 0 5px ${genre.color}66`, animation:`winkWin ${1.5+(i%4)}s infinite ${(i*0.4)%2}s` }} />
+        <div key={i} style={{ position:"absolute", bottom:12+i*24, left:width*0.1, width:width*0.28, height:10, background: Math.sin(i*7+artist.popularity)>0.2 ? `${genre.color}dd` : `${genre.color}28`, boxShadow:`0 0 5px ${genre.color}66`, animation:`winkWin ${1.5+(i%4)}s infinite ${(i*0.4)%2}s` }} />
       ))}
       {glowIntensity > 0.5 && (
-        <div style={{ position:"absolute", bottom:height+2, left:"50%", transform:"translateX(-50%)", width:3, height:50, background:`linear-gradient(to top,${genre.color}cc,transparent)`, filter:"blur(2px)", animation:`beacon ${0.4+artist.energy*1.8}s infinite alternate` }} />
+        <div style={{ position:"absolute", bottom:height+6, left:"50%", transform:"translateX(-50%)", width:3, height:50, background:`linear-gradient(to top,${genre.color}cc,transparent)`, filter:"blur(2px)", animation:`beacon ${0.4+artist.energy*1.8}s infinite alternate` }} />
       )}
       {isActive && (
-        <div style={{ position:"absolute", bottom:height+16, left:"50%", transform:"translateX(-50%)", whiteSpace:"nowrap", color:"#fff", fontSize:11, fontFamily:"monospace", fontWeight:"bold", background:"rgba(0,0,0,0.88)", padding:"3px 10px", borderRadius:4, border:`1px solid ${genre.color}55`, boxShadow:`0 0 10px ${genre.color}44`, textShadow:`0 0 8px ${genre.color}`, letterSpacing:0.5 }}>
+        <div style={{ position:"absolute", bottom:height+22, left:"50%", transform:"translateX(-50%)", whiteSpace:"nowrap", color:"#fff", fontSize:11, fontFamily:"monospace", fontWeight:"bold", background:"rgba(0,0,0,0.88)", padding:"3px 10px", borderRadius:4, border:`1px solid ${genre.color}55`, boxShadow:`0 0 10px ${genre.color}44`, textShadow:`0 0 8px ${genre.color}`, letterSpacing:0.5 }}>
           {artist.name}
         </div>
       )}
@@ -371,6 +572,29 @@ function Road({ from, to }) {
 function ArtistCard({ artist, onClose, onPlay }) {
   if (!artist) return null;
   const genre = GENRES[artist.genre] || GENRES.indie;
+  const popularityValue = Number.isFinite(Number(artist.popularity)) ? Number(artist.popularity) : null;
+  const followersValue = Number.isFinite(Number(artist.followers)) ? Number(artist.followers) : null;
+  const topTrackValue = artist.topTrack && artist.topTrack !== "—"
+    ? artist.topTrack
+    : (artist.topTracks?.find(Boolean) || "Unavailable");
+  const metricBars = [
+    { label:"ENERGY", value:artist.energy, color:"#ff2d55" },
+    { label:"DANCEABILITY", value:artist.danceability, color:"#00f5ff" },
+    { label:"VALENCE", value:artist.valence, color:"#ffd700" },
+    // ...(popularityValue != null ? [{ label:"POPULARITY", value:popularityValue / 100, color:genre.color, display:`${Math.round(popularityValue)}%` }] : []),
+  ];
+  const infoItems = [
+    { label:"RECENT PLAYS", value: artist.plays || "—" },
+    // ...(followersValue != null ? [{ label:"FOLLOWERS", value: followersValue > 1e6 ? `${(followersValue/1e6).toFixed(1)}M` : followersValue >= 1000 ? `${Math.floor(followersValue/1e3)}K` : String(followersValue) }] : []),
+    { label:"LAST PLAYED", value: artist.lastPlayed <= 1 ? "Today" : `${artist.lastPlayed}d ago` },
+    { label:"TOP TRACK", value: topTrackValue },
+  ];
+  const displayTracks = (artist.topTracks?.filter(Boolean)?.length
+    ? artist.topTracks.filter(Boolean)
+    : topTrackValue !== "Unavailable"
+      ? [topTrackValue]
+      : []
+  ).slice(0, 3);
   return (
     <div style={{ position:"fixed", right:24, top:"50%", transform:"translateY(-50%)", width:280, background:"rgba(5,5,14,0.97)", border:`1px solid ${genre.color}44`, borderRadius:14, padding:24, fontFamily:"monospace", zIndex:500, boxShadow:`0 0 50px ${genre.color}18`, backdropFilter:"blur(20px)", animation:"slideIn 0.2s ease" }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
@@ -383,16 +607,11 @@ function ArtistCard({ artist, onClose, onPlay }) {
         </div>
         <button onClick={onClose} style={{ background:"none", border:"1px solid #ffffff22", color:"#ffffff55", cursor:"pointer", padding:"2px 8px", borderRadius:4, fontSize:12 }}>✕</button>
       </div>
-      {[
-        { label:"ENERGY",       value:artist.energy,           color:"#ff2d55" },
-        { label:"DANCEABILITY", value:artist.danceability,     color:"#00f5ff" },
-        { label:"VALENCE",      value:artist.valence,          color:"#ffd700" },
-        { label:"POPULARITY",   value:artist.popularity/100,   color:genre.color },
-      ].map(s => (
+      {metricBars.map(s => (
         <div key={s.label} style={{ marginBottom:9 }}>
           <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
             <span style={{ color:"#ffffff44", fontSize:9, letterSpacing:1 }}>{s.label}</span>
-            <span style={{ color:s.color, fontSize:9 }}>{Math.round(s.value*100)}%</span>
+            <span style={{ color:s.color, fontSize:9 }}>{s.display || `${Math.round(s.value*100)}%`}</span>
           </div>
           <div style={{ height:3, background:"#ffffff0f", borderRadius:2 }}>
             <div style={{ height:"100%", width:`${s.value*100}%`, background:`linear-gradient(to right,${s.color}77,${s.color})`, borderRadius:2, boxShadow:`0 0 5px ${s.color}`, transition:"width 0.6s ease" }} />
@@ -401,17 +620,22 @@ function ArtistCard({ artist, onClose, onPlay }) {
       ))}
       <div style={{ borderTop:"1px solid #ffffff0f", marginTop:16, paddingTop:14 }}>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
-          {[
-            { label:"RECENT PLAYS", value: artist.plays || "—" },
-            { label:"FOLLOWERS",    value: artist.followers > 1e6 ? `${(artist.followers/1e6).toFixed(1)}M` : `${Math.floor(artist.followers/1e3)}K` },
-            { label:"LAST PLAYED",  value: artist.lastPlayed <= 1 ? "Today" : `${artist.lastPlayed}d ago` },
-            { label:"TOP TRACK",    value: artist.topTrack },
-          ].map(item => (
+          {infoItems.map(item => (
             <div key={item.label}>
               <div style={{ color:"#ffffff22", fontSize:8, letterSpacing:1 }}>{item.label}</div>
               <div style={{ color:"#ffffffcc", fontSize:11, marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{item.value}</div>
             </div>
           ))}
+        </div>
+        <div style={{ marginBottom:14 }}>
+          <div style={{ color:"#ffffff22", fontSize:8, letterSpacing:1, marginBottom:6 }}>TOP 3 TRACKS</div>
+          <div style={{ display:"grid", gap:6 }}>
+            {(displayTracks.length ? displayTracks : ["Recent tracks unavailable"]).map((track, index) => (
+              <div key={`${artist.id}-${track}-${index}`} style={{ color:"#ffffffcc", fontSize:11, padding:"7px 9px", borderRadius:8, background:"rgba(255,255,255,0.03)", border:"1px solid rgba(255,255,255,0.06)" }}>
+                {index + 1}. {track}
+              </div>
+            ))}
+          </div>
         </div>
         <button onClick={() => onPlay(artist)} style={{ width:"100%", background: artist.previewUrl ? `linear-gradient(135deg,${genre.color}33,${genre.accent}22)` : "#ffffff08", border:`1px solid ${artist.previewUrl ? genre.color+"66" : "#ffffff11"}`, color: artist.previewUrl ? genre.color : "#ffffff33", padding:"10px 0", borderRadius:8, cursor: artist.previewUrl ? "pointer" : "default", fontFamily:"monospace", fontSize:11, letterSpacing:1, fontWeight:"bold" }}>
           {artist.previewUrl ? `▶ PLAY: ${artist.topTrack.slice(0,22)}` : "⊘ NO PREVIEW AVAILABLE"}
@@ -593,8 +817,6 @@ export default function SpotifyCity() {
   const [beatPulse, setBeatPulse]       = useState(0);
   const [timeSlider, setTimeSlider]     = useState(11);
   const [camOffset, setCamOffset]       = useState({ x:0, y:0 });
-  const [dragging, setDragging]         = useState(false);
-  const [dragStart, setDragStart]       = useState({ x:0, y:0 });
   const [zoom, setZoom]                 = useState(1);
   const [showHelp, setShowHelp]         = useState(true);
   const audioRef = useRef(null);
@@ -721,16 +943,60 @@ export default function SpotifyCity() {
     else           { audioRef.current.play().catch(()=>{}); setIsPlaying(true); }
   }, [isPlaying]);
 
-  const onMouseDown = e => { setDragging(true); setDragStart({ x:e.clientX-camOffset.x, y:e.clientY-camOffset.y }); };
-  const onMouseMove = e => { if (dragging) setCamOffset({ x:e.clientX-dragStart.x, y:e.clientY-dragStart.y }); };
-  const onMouseUp   = () => setDragging(false);
-  const onWheel     = e => { e.preventDefault(); setZoom(z => Math.max(0.35, Math.min(2.8, z - e.deltaY*0.001))); };
-
   const timeMultiplier = 0.45 + (timeSlider/11)*0.55;
   const artists = cityData?.artists ?? [];
-  const roads = artists.length > 1
-    ? artists.slice(0,-1).map((a,i)=>[a,artists[i+1]]).filter((_,i)=>i%2===0)
-    : [];
+  const activeArtist = hoveredArtist || selectedArtist;
+  const roads = useMemo(() => {
+    if (artists.length < 2) return [];
+
+    const distance = (a, b) => Math.hypot((a.x || 0) - (b.x || 0), (a.z || 0) - (b.z || 0));
+    const ringGroups = new Map();
+
+    artists.forEach((artist) => {
+      const r = Math.hypot(artist.x || 0, artist.z || 0);
+      const ring = Math.max(0, Math.floor((r - 2) / 3.2));
+      if (!ringGroups.has(ring)) ringGroups.set(ring, []);
+      ringGroups.get(ring).push(artist);
+    });
+
+    ringGroups.forEach((group) => {
+      group.sort((a, b) => Math.atan2(a.z || 0, a.x || 0) - Math.atan2(b.z || 0, b.x || 0));
+    });
+
+    const seen = new Set();
+    const addRoad = (a, b, out) => {
+      if (!a?.id || !b?.id || a.id === b.id) return;
+      const key = [a.id, b.id].sort().join(":");
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push([a, b]);
+    };
+
+    const out = [];
+    const sortedRings = [...ringGroups.entries()].sort((a, b) => a[0] - b[0]);
+
+    sortedRings.forEach(([ring, group]) => {
+      if (group.length < 2) return;
+
+      for (let i = 0; i < group.length; i += 1) {
+        const current = group[i];
+        const next = group[(i + 1) % group.length];
+        if (group.length > 2 || i < group.length - 1) addRoad(current, next, out);
+      }
+
+      const prevGroup = ringGroups.get(ring - 1);
+      if (prevGroup?.length) {
+        group.forEach((artist) => {
+          const nearest = prevGroup
+            .map((candidate) => ({ candidate, d: distance(artist, candidate) }))
+            .sort((a, b) => a.d - b.d)[0]?.candidate;
+          if (nearest) addRoad(artist, nearest, out);
+        });
+      }
+    });
+
+    return out;
+  }, [artists]);
 
   const CSS = `
     @keyframes winkWin{0%,94%{opacity:1}95%,100%{opacity:.2}}
@@ -763,70 +1029,24 @@ export default function SpotifyCity() {
         <div key={i} style={{ position:"fixed", width:i%6===0?2:1, height:i%6===0?2:1, background:"#fff", opacity:0.1+(i%5)*0.08, left:`${(i*7.1)%100}%`, top:`${(i*5.9)%50}%`, borderRadius:"50%", pointerEvents:"none", animation:`float ${2+(i%5)}s infinite alternate ${i*0.2}s` }} />
       ))}
 
-      {/* City canvas */}
-      <div style={{ position:"fixed", inset:0, cursor:dragging?"grabbing":"grab", zIndex:10 }}
-        onMouseDown={onMouseDown} onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp} onMouseLeave={onMouseUp} onWheel={onWheel}>
-        <div style={{ position:"absolute", left:"50%", top:"55%", transform:`translate(-50%,-50%) translate(${camOffset.x}px,${camOffset.y}px) scale(${zoom})`, transformOrigin:"center center" }}>
-          {/* Ground */}
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              top: "50%",
-              transform: "translate(-50%,-50%)",
-              width: 1160,
-              height: 760,
-              borderRadius: "50%",
-              background: "radial-gradient(ellipse at center, rgba(16,34,50,0.95) 0%, rgba(8,14,24,0.92) 48%, rgba(2,4,10,0.25) 72%, rgba(0,0,0,0) 100%)",
-              boxShadow: "0 0 120px rgba(0,245,255,0.08), inset 0 0 60px rgba(255,255,255,0.04)",
-              pointerEvents: "none",
-            }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              top: "50%",
-              transform: "translate(-50%,-50%)",
-              width: 980,
-              height: 980,
-              backgroundImage: "linear-gradient(rgba(0,245,255,0.08) 1px,transparent 1px),linear-gradient(90deg,rgba(0,245,255,0.08) 1px,transparent 1px)",
-              backgroundSize: "42px 42px",
-              maskImage: "radial-gradient(circle, black 0%, black 58%, transparent 82%)",
-              WebkitMaskImage: "radial-gradient(circle, black 0%, black 58%, transparent 82%)",
-              opacity: 0.65,
-              pointerEvents: "none",
-            }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              top: "50%",
-              transform: "translate(-50%,-50%)",
-              width: 1080,
-              height: 1080,
-              borderRadius: "50%",
-              border: "1px solid rgba(0,245,255,0.12)",
-              boxShadow: "0 0 50px rgba(0,245,255,0.08)",
-              pointerEvents: "none",
-            }}
-          />
-          {roads.map(([a,b],i) => <Road key={i} from={a} to={b} />)}
-          {[...artists].sort((a,b)=>(a.x+a.z)-(b.x+b.z)).map(artist => (
-            <Building key={artist.id} artist={artist}
-              selected={selectedArtist} hovered={hoveredArtist}
-              onHover={setHovered} onLeave={()=>setHovered(null)}
-              onClick={a => { setSelected(p => p?.id===a.id ? null : a); setShowHelp(false); }}
-              beatPulse={beatPulse} timeMultiplier={timeMultiplier} />
-          ))}
-        </div>
-      </div>
+      <CityScene
+        artists={artists}
+        roads={roads}
+        selectedArtist={selectedArtist}
+        hoveredArtist={hoveredArtist}
+        onHover={setHovered}
+        onLeave={() => setHovered(null)}
+        onSelect={(artist) => {
+          setSelected((prev) => (prev?.id === artist.id ? null : artist));
+          setShowHelp(false);
+        }}
+        beatPulse={beatPulse}
+        timeMultiplier={timeMultiplier}
+      />
 
       {/* UI overlays */}
       <StatsPanel user={cityData?.user} />
-      <ArtistCard artist={selectedArtist} onClose={()=>setSelected(null)} onPlay={handlePlay} />
+      <ArtistCard artist={activeArtist} onClose={()=>setSelected(null)} onPlay={handlePlay} />
       <MiniMap artists={artists} selected={selectedArtist} />
       <TimeSlider value={timeSlider} onChange={setTimeSlider} />
       <NowPlaying artist={playingArtist} isPlaying={isPlaying} onToggle={handleToggle} />
